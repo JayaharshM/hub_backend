@@ -60,4 +60,5 @@ class Settings(BaseSettings):
     test_password: str = ""
     test_name: str = ""
     test_phone: str = ""
+
 settings = Settings()
