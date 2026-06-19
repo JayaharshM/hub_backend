@@ -8,6 +8,9 @@ from app.routers.focus import router as focus_router
 from app.routers.calendar import router as calendar_router
 from app.routers.notes import router as notes_router
 from app.routers.folders import router as folders_router
+from app.routers.preferences import router as preferences_router
+from app.routers.system import router as system_router
+from app.routers.roles import router as roles_router
 
 __all__ = [
     "auth_router",
@@ -20,5 +23,7 @@ __all__ = [
     "calendar_router",
     "notes_router",
     "folders_router",
+    "preferences_router", 
+    "system_router", 
+    "roles_router"
 ]
-
