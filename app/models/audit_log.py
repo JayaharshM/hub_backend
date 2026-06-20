@@ -34,6 +34,7 @@ class AuditLog(Base):
     )
 
     details: Mapped[dict] = mapped_column(
+        "metadata",
         JSONB,
         default=dict,
     )

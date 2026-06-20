@@ -25,7 +25,12 @@ async def client():
 @pytest_asyncio.fixture(autouse=True)
 async def clean_database():
     from app.database import engine
+    from app.redis import redis_client
     await engine.dispose()
+    try:
+        await redis_client.aclose()
+    except Exception:
+        pass
     async with AsyncSessionLocal() as session:
         await session.execute(text("TRUNCATE TABLE users, todos CASCADE;"))
         await session.commit()

@@ -12,6 +12,7 @@ Requires is_admin=True on the authenticated user.
 
 
 import csv
+import httpx
 import io
 import secrets
 import string
@@ -20,7 +21,6 @@ import uuid
 from fastapi import BackgroundTasks
 from app.database import AsyncSessionLocal
 from app.queue.producer import (
-    publish_bulk_credentials,
     publish_user_cleanup,
 )
 
@@ -48,7 +48,7 @@ def _generate_temp_password(length: int = 12) -> str:
 
 async def _process_bulk_users(rows: list[dict]):
     async with AsyncSessionLocal() as db:
-
+        recipients = []
         for row in rows:
             email = row["email"].strip().lower()
             full_name = row["full_name"].strip()
@@ -71,16 +71,38 @@ async def _process_bulk_users(rows: list[dict]):
             )
 
             db.add(user)
-
             await db.flush()
 
-            await publish_bulk_credentials({
-                "email": email,
-                "full_name": full_name,
-                "temporary_password": temp_password
+            recipients.append({
+                "recipient": email,
+                "subject": "Your CixioHub Credentials",
+                "body": f"Hello {full_name},\n\nYour account has been created on CixioHub.\nEmail: {email}\nTemporary Password: {temp_password}\n\nPlease log in and change your password.",
+                "html_body": f"<p>Hello {full_name},</p><p>Your account has been created on CixioHub.<br><strong>Email:</strong> {email}<br><strong>Temporary Password:</strong> {temp_password}</p><p>Please log in and change your password.</p>",
+                "message_type": "general",
+                "priority": "high",
             })
 
         await db.commit()
+
+        if recipients:
+            try:
+                from app.config import settings
+                from app.auth.security.jwt import create_access_token
+                
+                token = create_access_token({"sub": "admin", "role": "admin"})
+                headers = {"Authorization": f"Bearer {token}"}
+                payload = {
+                    "channel": "email",
+                    "recipients": recipients
+                }
+                # Replace /send with /bulk
+                bulk_url = settings.notification_service_url.replace("/send", "/bulk")
+                
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(bulk_url, json=payload, headers=headers)
+                    response.raise_for_status()
+            except Exception as e:
+                print("Failed to send bulk credentials notification:", e)
 
 
 @router.post("/users/bulk", status_code=status.HTTP_202_ACCEPTED)

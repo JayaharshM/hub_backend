@@ -6,7 +6,8 @@ from fastapi import HTTPException, status
 from app.models.calendar import CalendarEvent
 from app.models.todo import Todo
 from app.schemas.calendar import CreateCalendarEventRequest, UpdateCalendarEventRequest
-from app.queue.producer import publish_calendar_notification
+from app.models.user import User
+from app.queue.producer import publish_notification_to_queue
 
 class CalendarService:
     def __init__(self, db: AsyncSession):
@@ -40,12 +41,18 @@ class CalendarService:
 
         if event.reminder_time:
             try:
-                await publish_calendar_notification({
-                    "user_id": str(user_id),
-                    "event_id": str(event.id),
-                    "title": event.title,
-                    "reminder_time": event.reminder_time.isoformat()
-                })
+                user_res = await self.db.execute(select(User).where(User.id == user_id))
+                user = user_res.scalar_one_or_none()
+                if user and user.email:
+                    await publish_notification_to_queue(
+                        channel="email",
+                        recipient=user.email,
+                        subject=f"Event Reminder: {event.title}",
+                        body=f"This is a reminder for your event: {event.title}. Scheduled to start at: {event.start_time.isoformat()}.",
+                        html_body=f"<p>This is a reminder for your event: <strong>{event.title}</strong>.<br>Scheduled to start at: {event.start_time.isoformat()}.</p>",
+                        message_type="calendar_reminder",
+                        priority="medium",
+                    )
             except Exception:
                 pass
 
@@ -107,12 +114,18 @@ class CalendarService:
             event.reminder_time = body.reminder_time
             if event.reminder_time and event.reminder_time != old_reminder:
                 try:
-                    await publish_calendar_notification({
-                        "user_id": str(user_id),
-                        "event_id": str(event.id),
-                        "title": event.title,
-                        "reminder_time": event.reminder_time.isoformat()
-                    })
+                    user_res = await self.db.execute(select(User).where(User.id == user_id))
+                    user = user_res.scalar_one_or_none()
+                    if user and user.email:
+                        await publish_notification_to_queue(
+                            channel="email",
+                            recipient=user.email,
+                            subject=f"Event Reminder: {event.title}",
+                            body=f"This is a reminder for your event: {event.title}. Scheduled to start at: {event.start_time.isoformat()}.",
+                            html_body=f"<p>This is a reminder for your event: <strong>{event.title}</strong>.<br>Scheduled to start at: {event.start_time.isoformat()}.</p>",
+                            message_type="calendar_reminder",
+                            priority="medium",
+                        )
                 except Exception:
                     pass
 

@@ -16,7 +16,7 @@ from app.schemas.todo import (
     TodoResponse,
     UpdateTodoRequest,
 )
-from app.queue.producer import publish_todo_reminder
+from app.queue.producer import publish_notification_to_queue
 
 router = APIRouter(prefix="/todos", tags=["todos"])
 
@@ -54,12 +54,17 @@ async def create_todo(
 
     if todo.reminder_time:
         try:
-            await publish_todo_reminder({
-                "user_id": str(current_user.id),
-                "todo_id": str(todo.id),
-                "title": todo.title,
-                "reminder_time": todo.reminder_time.isoformat()
-            })
+            tokens = current_user.device_tokens or []
+            for token in tokens:
+                await publish_notification_to_queue(
+                    channel="push",
+                    recipient=token,
+                    title="Todo Reminder",
+                    body=f"Reminder for your task '{todo.title}' due on {todo.due_date.isoformat() if todo.due_date else 'None'}.",
+                    message_type="todo_reminder",
+                    priority="medium",
+                    data={"todo_id": str(todo.id)},
+                )
         except Exception:
             pass
 
@@ -89,18 +94,22 @@ async def update_todo(
         todo.due_date = body.due_date
     if body.priority is not None:
         todo.priority = body.priority
-    
     old_reminder = todo.reminder_time
     if body.reminder_time is not None:
         todo.reminder_time = body.reminder_time
         if todo.reminder_time and todo.reminder_time != old_reminder:
             try:
-                await publish_todo_reminder({
-                    "user_id": str(current_user.id),
-                    "todo_id": str(todo.id),
-                    "title": todo.title,
-                    "reminder_time": todo.reminder_time.isoformat()
-                })
+                tokens = current_user.device_tokens or []
+                for token in tokens:
+                    await publish_notification_to_queue(
+                        channel="push",
+                        recipient=token,
+                        title="Todo Reminder",
+                        body=f"Reminder for your task '{todo.title}' due on {todo.due_date.isoformat() if todo.due_date else 'None'}.",
+                        message_type="todo_reminder",
+                        priority="medium",
+                        data={"todo_id": str(todo.id)},
+                    )
             except Exception:
                 pass
 

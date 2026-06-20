@@ -11,7 +11,8 @@ from app.redis import redis_client
 from app.models.todo import Todo
 from app.models.focus import FocusSession
 from app.models.calendar import CalendarEvent as Event
-from app.models.focus import Achievement
+from app.models.focus import Achievement, UserAchievement
+from app.models.audit_log import AuditLog
 
 
 async def invalidate_dashboard_cache(user_id: uuid.UUID):
@@ -35,19 +36,12 @@ class DashboardService:
                 cached = cached.decode("utf-8")
             return json.loads(cached)
 
-        (
-            todos,
-            focus,
-            calendar,
-            achievements,
-            weekly_stats,
-        ) = await gather(
-            self._get_todo_stats(user_id),
-            self._get_focus_stats(user_id),
-            self._get_calendar_stats(user_id),
-            self._get_achievements(user_id),
-            self._get_weekly_stats(user_id),
-        )
+        todos = await self._get_todo_stats(user_id)
+        focus = await self._get_focus_stats(user_id)
+        calendar = await self._get_calendar_stats(user_id)
+        achievements = await self._get_achievements(user_id)
+        activity_feed = await self._get_activity_feed(user_id)
+        weekly_stats = await self._get_weekly_stats(user_id)
 
         response = {
             "todos": todos,
@@ -71,8 +65,8 @@ class DashboardService:
         result = await self.db.execute(
             select(
                 func.count(Todo.id),
-                func.sum(case((Todo.is_completed == True, 1), else_=0)),
-                func.sum(case((Todo.is_completed == False, 1), else_=0)),
+                func.sum(case((Todo.completed == True, 1), else_=0)),
+                func.sum(case((Todo.completed == False, 1), else_=0)),
                 func.sum(case((Todo.due_date < datetime.utcnow(), 1), else_=0)),
             ).where(Todo.user_id == user_id)
         )
@@ -90,23 +84,41 @@ class DashboardService:
     async def _get_focus_stats(self, user_id):
         week_start = datetime.utcnow() - timedelta(days=7)
 
-        result = await self.db.execute(
-            select(
-                func.count(FocusSession.id),
-                func.sum(FocusSession.duration_minutes),
-                func.avg(FocusSession.productivity_score),
-            ).where(
+        sessions_res = await self.db.execute(
+            select(func.count(FocusSession.id)).where(
                 FocusSession.user_id == user_id,
-                FocusSession.created_at >= week_start,
+                FocusSession.start_time >= week_start,
             )
         )
+        sessions = sessions_res.scalar() or 0
 
-        sessions, minutes, score = result.first()
+        focus_res = await self.db.execute(
+            select(func.sum(FocusSession.duration_minutes)).where(
+                FocusSession.user_id == user_id,
+                FocusSession.type == "focus",
+                FocusSession.status == "completed",
+                FocusSession.start_time >= week_start,
+            )
+        )
+        total_focus = focus_res.scalar() or 0
+
+        break_res = await self.db.execute(
+            select(func.sum(FocusSession.duration_minutes)).where(
+                FocusSession.user_id == user_id,
+                FocusSession.type.in_(["short_break", "long_break"]),
+                FocusSession.status == "completed",
+                FocusSession.start_time >= week_start,
+            )
+        )
+        total_break = break_res.scalar() or 0
+
+        total_time = total_focus + total_break
+        score = min(100, int((total_focus / total_time) * 100)) if total_time > 0 else 0
 
         return {
-            "sessions_this_week": sessions or 0,
-            "total_focus_minutes": minutes or 0,
-            "productivity_score": int(score or 0),
+            "sessions_this_week": sessions,
+            "total_focus_minutes": total_focus,
+            "productivity_score": score,
         }
 
     # ---------------- CALENDAR ----------------
@@ -145,21 +157,37 @@ class DashboardService:
     # ---------------- ACHIEVEMENTS ----------------
     async def _get_achievements(self, user_id):
         result = await self.db.execute(
-            select(Achievement)
-            .where(Achievement.user_id == user_id)
-            .order_by(Achievement.earned_at.desc())
+            select(Achievement.name, UserAchievement.earned_at)
+            .join(UserAchievement, UserAchievement.achievement_id == Achievement.id)
+            .where(UserAchievement.user_id == user_id)
+            .order_by(UserAchievement.earned_at.desc())
             .limit(10)
         )
 
         return [
             {
-                "name": a.name,
-                "earned_at": a.earned_at,
+                "name": name,
+                "earned_at": earned_at,
             }
-            for a in result.scalars().all()
+            for name, earned_at in result.all()
         ]
 
     # ---------------- ACTIVITY FEED ----------------
+    async def _get_activity_feed(self, user_id):
+        result = await self.db.execute(
+            select(AuditLog)
+            .where(AuditLog.user_id == user_id)
+            .order_by(AuditLog.created_at.desc())
+            .limit(10)
+        )
+        return [
+            {
+                "action": log.action,
+                "resource": log.resource,
+                "timestamp": log.created_at,
+            }
+            for log in result.scalars().all()
+        ]
 
     # ---------------- WEEKLY STATS ----------------
     async def _get_weekly_stats(self, user_id):
@@ -167,15 +195,15 @@ class DashboardService:
 
         result = await self.db.execute(
             select(
-                func.date(FocusSession.created_at),
+                func.date(FocusSession.start_time),
                 func.count(FocusSession.id),
             )
             .where(
                 FocusSession.user_id == user_id,
-                FocusSession.created_at >= week_start,
+                FocusSession.start_time >= week_start,
             )
-            .group_by(func.date(FocusSession.created_at))
-            .order_by(func.date(FocusSession.created_at))
+            .group_by(func.date(FocusSession.start_time))
+            .order_by(func.date(FocusSession.start_time))
         )
 
         rows = result.all()
@@ -184,7 +212,7 @@ class DashboardService:
 
         completion_result = await self.db.execute(
             select(func.avg(
-                func.case((Todo.is_completed == True, 1), else_=0)
+                case((Todo.completed == True, 1), else_=0)
             )).where(
                 Todo.user_id == user_id,
                 Todo.created_at >= week_start,
