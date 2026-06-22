@@ -47,6 +47,8 @@ class AIClient(Protocol):
         user_id: uuid.UUID,
         query: str,
         limit: int = 4,
+        retrieval_mode: str = "semantic",
+        use_hyde: bool = False,
         allowed_document_ids: list[uuid.UUID] | None = None,
         session_id: uuid.UUID | None = None,
         selected_document_ids: list[uuid.UUID] | None = None,

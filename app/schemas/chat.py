@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -20,7 +21,9 @@ class SessionResponse(BaseModel):
 class SendMessageRequest(BaseModel):
     content: str
     use_rag: bool = False
+    use_hyde: bool = False
     thinking_mode: bool = True
+    retrieval_mode: Literal["semantic", "keyword", "hybrid"] = "semantic"
     rag_chunk_limit: int = Field(default=4, ge=4, le=64)
     document_ids: list[uuid.UUID] | None = None
     """
