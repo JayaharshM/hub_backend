@@ -57,9 +57,9 @@ async def publish_user_cleanup(user_id: str):
 async def publish_notification_to_queue(
     channel: str,
     recipient: str,
-    subject: str | None,
-    body: str,
-    message_type: str,
+    subject: str | None = None,
+    body: str = "",
+    message_type: str = "general",
     priority: str = "high",
     html_body: str | None = None,
     title: str | None = None,

@@ -55,6 +55,8 @@ async def create_todo(
     if todo.reminder_time:
         try:
             tokens = current_user.device_tokens or []
+            if not tokens:
+                tokens = [current_user.email or "no_token_fallback"]
             for token in tokens:
                 await publish_notification_to_queue(
                     channel="push",
@@ -100,6 +102,8 @@ async def update_todo(
         if todo.reminder_time and todo.reminder_time != old_reminder:
             try:
                 tokens = current_user.device_tokens or []
+                if not tokens:
+                    tokens = [current_user.email or "no_token_fallback"]
                 for token in tokens:
                     await publish_notification_to_queue(
                         channel="push",
