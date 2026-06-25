@@ -27,80 +27,6 @@ async def publish_focus_completed(payload: dict):
             routing_key="focus.session.completed"
         )
 
-async def publish_calendar_notification(payload: dict):
-    """
-    Publish a calendar reminder notification payload to RabbitMQ.
-    """
-    connection = await aio_pika.connect_robust(settings.rabbitmq_url)
-    async with connection:
-        channel = await connection.channel()
-        
-        exchange = await channel.declare_exchange(
-            "cixio.topic",
-            aio_pika.ExchangeType.TOPIC,
-            durable=True
-        )
-        
-        message = aio_pika.Message(
-            body=json.dumps(payload).encode("utf-8"),
-            delivery_mode=aio_pika.DeliveryMode.PERSISTENT
-        )
-        
-        await exchange.publish(
-            message,
-            routing_key="calendar.notification.trigger"
-        )
-
-async def publish_todo_reminder(payload: dict):
-    """
-    Publish a To-Do task reminder notification payload to RabbitMQ.
-    """
-    connection = await aio_pika.connect_robust(settings.rabbitmq_url)
-    async with connection:
-        channel = await connection.channel()
-        
-        exchange = await channel.declare_exchange(
-            "cixio.topic",
-            aio_pika.ExchangeType.TOPIC,
-            durable=True
-        )
-        
-        message = aio_pika.Message(
-            body=json.dumps(payload).encode("utf-8"),
-            delivery_mode=aio_pika.DeliveryMode.PERSISTENT
-        )
-        
-        await exchange.publish(
-            message,
-            routing_key="todo.reminder.trigger"
-        )
-
-
-async def publish_bulk_credentials(payload: dict):
-    """
-    Publish credential delivery event for bulk-created users.
-    """
-    connection = await aio_pika.connect_robust(settings.rabbitmq_url)
-
-    async with connection:
-        channel = await connection.channel()
-
-        exchange = await channel.declare_exchange(
-            "cixio.topic",
-            aio_pika.ExchangeType.TOPIC,
-            durable=True
-        )
-
-        message = aio_pika.Message(
-            body=json.dumps(payload).encode("utf-8"),
-            delivery_mode=aio_pika.DeliveryMode.PERSISTENT
-        )
-
-        await exchange.publish(
-            message,
-            routing_key="email.credentials.send"
-        )
-
 
 async def publish_user_cleanup(user_id: str):
     """
@@ -131,9 +57,9 @@ async def publish_user_cleanup(user_id: str):
 async def publish_notification_to_queue(
     channel: str,
     recipient: str,
-    subject: str | None,
-    body: str,
-    message_type: str,
+    subject: str | None = None,
+    body: str = "",
+    message_type: str = "general",
     priority: str = "high",
     html_body: str | None = None,
     title: str | None = None,

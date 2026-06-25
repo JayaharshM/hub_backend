@@ -80,8 +80,15 @@ class DashboardService:
     async def _get_focus_stats(self, user_id):
         week_start = datetime.utcnow() - timedelta(days=7)
 
-        # Sum focus minutes
-        focus_result = await self.db.execute(
+        sessions_res = await self.db.execute(
+            select(func.count(FocusSession.id)).where(
+                FocusSession.user_id == user_id,
+                FocusSession.start_time >= week_start,
+            )
+        )
+        sessions = sessions_res.scalar() or 0
+
+        focus_res = await self.db.execute(
             select(func.sum(FocusSession.duration_minutes)).where(
                 FocusSession.user_id == user_id,
                 FocusSession.type == "focus",
@@ -89,10 +96,9 @@ class DashboardService:
                 FocusSession.start_time >= week_start,
             )
         )
-        total_focus = focus_result.scalar() or 0
+        total_focus = focus_res.scalar() or 0
 
-        # Sum break minutes (short_break and long_break)
-        break_result = await self.db.execute(
+        break_res = await self.db.execute(
             select(func.sum(FocusSession.duration_minutes)).where(
                 FocusSession.user_id == user_id,
                 FocusSession.type.in_(["short_break", "long_break"]),
@@ -100,25 +106,15 @@ class DashboardService:
                 FocusSession.start_time >= week_start,
             )
         )
-        total_break = break_result.scalar() or 0
-
-        # Sum sessions count
-        sessions_result = await self.db.execute(
-            select(func.count(FocusSession.id)).where(
-                FocusSession.user_id == user_id,
-                FocusSession.status == "completed",
-                FocusSession.start_time >= week_start,
-            )
-        )
-        sessions_count = sessions_result.scalar() or 0
+        total_break = break_res.scalar() or 0
 
         total_time = total_focus + total_break
-        productivity_score = min(100, int((total_focus / total_time) * 100)) if total_time > 0 else 0
+        score = min(100, int((total_focus / total_time) * 100)) if total_time > 0 else 0
 
         return {
-            "sessions_this_week": sessions_count,
+            "sessions_this_week": sessions,
             "total_focus_minutes": total_focus,
-            "productivity_score": productivity_score,
+            "productivity_score": score,
         }
 
     # ---------------- CALENDAR ----------------
@@ -157,8 +153,8 @@ class DashboardService:
     # ---------------- ACHIEVEMENTS ----------------
     async def _get_achievements(self, user_id):
         result = await self.db.execute(
-            select(Achievement, UserAchievement.earned_at)
-            .join(UserAchievement, Achievement.id == UserAchievement.achievement_id)
+            select(Achievement.name, UserAchievement.earned_at)
+            .join(UserAchievement, UserAchievement.achievement_id == Achievement.id)
             .where(UserAchievement.user_id == user_id)
             .order_by(UserAchievement.earned_at.desc())
             .limit(10)
@@ -166,28 +162,27 @@ class DashboardService:
 
         return [
             {
-                "name": row[0].name,
-                "earned_at": row[1],
+                "name": name,
+                "earned_at": earned_at,
             }
-            for row in result.all()
+            for name, earned_at in result.all()
         ]
 
     # ---------------- ACTIVITY FEED ----------------
     async def _get_activity_feed(self, user_id):
         result = await self.db.execute(
-            select(AuditLog.action, AuditLog.resource, AuditLog.created_at)
+            select(AuditLog)
             .where(AuditLog.user_id == user_id)
             .order_by(AuditLog.created_at.desc())
             .limit(10)
         )
-
         return [
             {
-                "action": row.action,
-                "resource": row.resource,
-                "timestamp": row.created_at,
+                "action": log.action,
+                "resource": log.resource,
+                "timestamp": log.created_at,
             }
-            for row in result.all()
+            for log in result.scalars().all()
         ]
 
     # ---------------- WEEKLY STATS ----------------

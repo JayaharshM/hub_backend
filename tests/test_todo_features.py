@@ -25,10 +25,10 @@ async def client():
 @pytest_asyncio.fixture(autouse=True)
 async def clean_database():
     from app.database import engine
-    await engine.dispose()
     from app.redis import redis_client
+    await engine.dispose()
     try:
-        await redis_client.connection_pool.disconnect()
+        await redis_client.aclose()
     except Exception:
         pass
     async with AsyncSessionLocal() as session:
