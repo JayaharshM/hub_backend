@@ -77,6 +77,47 @@ class RemoteAIClient(AIClient):
             response.raise_for_status()
             return response.json()["chunks_stored"]
 
+    async def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> dict:
+        """One-shot chat completion with support for tool/function calling."""
+        async with self._get_client(timeout=120.0) as client:
+            response = await client.post(
+                "/api/v1/chat/tools",
+                json={
+                    "messages": messages,
+                    "tools": tools,
+                },
+            )
+            response.raise_for_status()
+            return response.json()["message"]
+
+    async def store_image_vectors(
+        self,
+        user_id: uuid.UUID,
+        document_id: uuid.UUID,
+        filename: str,
+        image_metadata: list[dict],
+        session_id: uuid.UUID | None = None,
+    ) -> int:
+        """Process, describe, embed, and store image vectors for a document."""
+        async with self._get_client(timeout=120.0) as client:
+            response = await client.post(
+                "/api/v1/documents/ingest_images",
+                json={
+                    "user_id": str(user_id),
+                    "document_id": str(document_id),
+                    "filename": filename,
+                    "image_metadata": image_metadata,
+                    "session_id": str(session_id) if session_id else None,
+                },
+            )
+            response.raise_for_status()
+            res_data = response.json()
+            return res_data.get("chunks_stored") or res_data.get("images_stored") or 0
+
     async def search_relevant_chunks(
         self,
         user_id: uuid.UUID,
@@ -87,6 +128,7 @@ class RemoteAIClient(AIClient):
         allowed_document_ids: list[uuid.UUID] | None = None,
         session_id: uuid.UUID | None = None,
         selected_document_ids: list[uuid.UUID] | None = None,
+        use_reranker: bool = False,
     ) -> list[dict]:
         async with self._get_client() as client:
             response = await client.post(
@@ -100,6 +142,7 @@ class RemoteAIClient(AIClient):
                     "allowed_document_ids": [str(d) for d in allowed_document_ids] if allowed_document_ids else None,
                     "session_id": str(session_id) if session_id else None,
                     "selected_document_ids": [str(d) for d in selected_document_ids] if selected_document_ids else None,
+                    "use_reranker": use_reranker,
                 },
             )
             response.raise_for_status()

@@ -31,7 +31,7 @@ async def chat_stream(
 
     Raises httpx.ConnectError if Ollama is not reachable.
     """
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=300) as client:
         async with client.stream(
             "POST",
             f"{settings.ollama_base_url}/api/chat",
@@ -39,19 +39,40 @@ async def chat_stream(
                 "model": settings.ollama_model,
                 "messages": messages,
                 "stream": True,
+                "options": {
+                    "num_ctx": 16384,
+                    "num_predict": -1,
+                },
+                "keep_alive": "5m",
             },
         ) as response:
             response.raise_for_status()
+            in_thinking = False
             async for line in response.aiter_lines():
                 if not line:
                     continue
                 try:
                     parsed = json.loads(line)
-                    token: str = parsed.get("message", {}).get("content", "")
-                    if token:
-                        yield token
+                    message = parsed.get("message", {})
+                    
+                    thinking_token = message.get("thinking", "")
+                    content_token = message.get("content", "")
+                    
+                    if thinking_token:
+                        if not in_thinking:
+                            in_thinking = True
+                            yield "<think>"
+                        yield thinking_token
+                    elif content_token:
+                        if in_thinking:
+                            in_thinking = False
+                            yield "</think>"
+                        yield content_token
                 except (json.JSONDecodeError, KeyError):
                     continue
+            
+            if in_thinking:
+                yield "</think>"
 
 
 async def summarize_text(text: str) -> str:
@@ -84,3 +105,37 @@ async def get_embedding(text: str) -> list[float]:
     Delegates to vector_service.get_ollama_embedding().
     """
     return await get_ollama_embedding(text)
+
+
+async def chat_with_tools(
+    messages: list[dict],
+    tools: list[dict] | None = None,
+) -> dict:
+    """
+    One-shot chat completion with Ollama supporting tool/function calling.
+    Returns the message dictionary (which may contain 'content' or 'tool_calls').
+    """
+    payload = {
+        "model": settings.ollama_model,
+        "messages": messages,
+        "stream": False,
+        "options": {
+            "num_ctx": 16384,
+            "num_predict": -1,
+        },
+        "keep_alive": "5m",
+    }
+    if tools:
+        payload["tools"] = tools
+
+    async with httpx.AsyncClient(timeout=300) as client:
+        try:
+            response = await client.post(
+                f"{settings.ollama_base_url}/api/chat",
+                json=payload,
+            )
+            response.raise_for_status()
+            return response.json().get("message", {})
+        except Exception as exc:
+            logger.error("Ollama chat_with_tools request failed: %s", exc)
+            raise exc

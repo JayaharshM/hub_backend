@@ -187,8 +187,8 @@ def get_clean_overlap(chunk: str, overlap: int) -> str:
 
 def chunk_text(
     text: str,
-    chunk_size: int = 800,
-    overlap: int = 100,
+    chunk_size: int = 1500,
+    overlap: int = 200,
 ) -> list[str]:
     """
     Paragraph-aware text chunker.
@@ -277,6 +277,7 @@ async def store_document_vectors(
 
     Returns the number of chunks stored.
     """
+    await init_qdrant_collection()
     chunks = chunk_text(text)
     if not chunks:
         logger.warning("Document %s produced no text chunks.", document_id)
@@ -308,6 +309,89 @@ async def store_document_vectors(
         "Stored %d chunks for document %s (user %s).", len(points), document_id, user_id
     )
     return len(points)
+
+
+async def store_image_vectors(
+    user_id: uuid.UUID,
+    document_id: uuid.UUID,
+    filename: str,
+    image_metadata: list[dict],
+    session_id: uuid.UUID | None = None,
+) -> int:
+    """
+    Generate descriptions for each image, generate their embeddings,
+    and store them in Qdrant.
+    
+    image_metadata: list[dict] where each item is {"base64_image": str, "page_number": int}
+    """
+    await init_qdrant_collection()
+    from app.ai.services.vision_service import describe_image
+
+    if not image_metadata:
+        return 0
+
+    points: list[PointStruct] = []
+
+    for idx, meta in enumerate(image_metadata):
+        b64 = meta["base64_image"]
+        page_num = meta["page_number"]
+
+        try:
+            print(f"\n[Vision AI] Page {page_num}: Sending image to Ollama ({settings.ollama_vision_model}) for visual description...")
+            description = await describe_image(b64)
+            if not description:
+                print(f"[Vision AI] Page {page_num}: Received empty description from model.")
+                continue
+
+            print(f"[Vision AI] Page {page_num}: Description generated successfully! Chunking and embedding...")
+            formatted_text = f"[Image Description - Page {page_num}]: {description}"
+            chunks = chunk_text(formatted_text, chunk_size=3000, overlap=300)
+            print(f"[Vision AI] Page {page_num}: Split description into {len(chunks)} chunks. Storing in Qdrant...")
+
+            for chunk_idx, chunk in enumerate(chunks):
+                embedding = await get_ollama_embedding(chunk, prefix_type="document")
+                points.append(
+                    PointStruct(
+                        id=str(uuid.uuid4()),
+                        vector=embedding,
+                        payload={
+                            "user_id": str(user_id),
+                            "document_id": str(document_id),
+                            "session_id": str(session_id) if session_id else None,
+                            "filename": filename,
+                            "text": chunk,
+                            "chunk_index": chunk_idx + 10000,  # Offset to prevent index collision
+                            "type": "image_description",
+                            "page_number": page_num,
+                        },
+                    )
+                )
+            print(f"[Vision AI] Page {page_num}: Chunks queued for Qdrant storage.")
+        except Exception as exc:
+            print(f"[Vision AI] Page {page_num}: Error processing image: {exc}")
+            logger.error(
+                "Failed to process and store image vector for page %d of document %s: %s",
+                page_num,
+                document_id,
+                exc,
+            )
+
+    if points:
+        print(f"[Vision AI] Upserting {len(points)} total vectors to Qdrant collection ({settings.qdrant_collection})...")
+        await qdrant_client.upsert(
+            collection_name=settings.qdrant_collection,
+            points=points,
+        )
+        print("[Vision AI] Qdrant upsert completed successfully!")
+        logger.info(
+            "Stored %d visual description vectors for document %s (user %s).",
+            len(points),
+            document_id,
+            user_id,
+        )
+        return len(points)
+
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +608,7 @@ async def search_relevant_chunks(
     allowed_document_ids: list[uuid.UUID] | None = None,
     session_id: uuid.UUID | None = None,
     selected_document_ids: list[uuid.UUID] | None = None,
+    use_reranker: bool = False,
 ) -> list[dict]:
     """
     Retrieve the top-`limit` document chunks most semantically similar to `query`.
@@ -541,6 +626,7 @@ async def search_relevant_chunks(
     These are forwarded directly to the SSE stream as a 'sources' event so the
     frontend can render clickable citation badges.
     """
+    await init_qdrant_collection()
     if allowed_document_ids is not None and not allowed_document_ids:
         return []
 
@@ -550,7 +636,7 @@ async def search_relevant_chunks(
 
     keywords = _query_keywords(query)
     has_boosting = bool(session_id or keywords or selected_document_ids)
-    candidate_limit = max(limit * 3, 15) if has_boosting or retrieval_mode == "hybrid" else limit
+    candidate_limit = max(limit * 4, 25) if (has_boosting or retrieval_mode == "hybrid" or use_reranker) else limit
 
     candidates: dict[tuple[str, int], dict] = {}
     semantic_query = query
@@ -567,6 +653,7 @@ async def search_relevant_chunks(
                 exc_info=settings.debug,
             )
 
+    semantic_results = []
     if retrieval_mode in {"semantic", "hybrid"}:
         semantic_results = await _semantic_candidates(
             user_id=user_id,
@@ -582,6 +669,7 @@ async def search_relevant_chunks(
                 "keyword_score": _keyword_score(payload, keywords),
             }
 
+    keyword_results = []
     if retrieval_mode in {"keyword", "hybrid"}:
         keyword_results = await _keyword_candidates(
             user_id=user_id,
@@ -605,35 +693,104 @@ async def search_relevant_chunks(
     if retrieval_mode == "keyword" and not candidates:
         return []
 
+    # Map candidate keys to their rank index (1-based)
+    semantic_ranks = {
+        _result_key(payload): rank
+        for rank, (payload, _) in enumerate(semantic_results, start=1)
+    }
+    keyword_ranks = {
+        _result_key(payload): rank
+        for rank, (payload, _) in enumerate(keyword_results, start=1)
+    }
+
     reranked = []
-    for item in candidates.values():
-        payload = item["payload"]
-        semantic_score = item["semantic_score"]
-        keyword_score = item["keyword_score"]
+    if use_reranker and candidates:
+        from app.ai.services.reranker_service import rerank_candidates
+        import math
 
-        if retrieval_mode == "hybrid":
-            base_score = (semantic_score * 0.65) + (keyword_score * 0.35)
-        elif retrieval_mode == "keyword":
-            base_score = keyword_score
-        else:
-            base_score = semantic_score
+        # Prepare candidates for reranking
+        items_to_rerank = []
+        for key, item in candidates.items():
+            payload = item["payload"]
+            semantic_score = item["semantic_score"]
+            keyword_score = item["keyword_score"]
 
-        final_score = _boosted_score(
-            payload=payload,
-            base_score=base_score,
-            keywords=keywords,
-            session_id=session_id,
-            selected_document_ids=selected_document_ids,
-        )
-        match_type = retrieval_mode
-        if retrieval_mode == "hybrid":
-            if semantic_score and keyword_score:
-                match_type = "hybrid"
-            elif semantic_score:
-                match_type = "semantic"
+            match_type = retrieval_mode
+            if retrieval_mode == "hybrid":
+                if semantic_score and keyword_score:
+                    match_type = "hybrid"
+                elif semantic_score:
+                    match_type = "semantic"
+                else:
+                    match_type = "keyword"
+            
+            items_to_rerank.append({
+                "key": key,
+                "text": payload.get("text", ""),
+                "payload": payload,
+                "match_type": match_type,
+            })
+
+        # Run model inference (thread-safe, does not block event loop)
+        reranked_items = await rerank_candidates(query, items_to_rerank)
+
+        for item in reranked_items:
+            payload = item["payload"]
+            match_type = item["match_type"]
+            logit_score = item["rerank_score"]
+
+            # Map raw logit score to [0, 1] using Sigmoid
+            try:
+                sigmoid_score = 1.0 / (1.0 + math.exp(-logit_score))
+            except OverflowError:
+                sigmoid_score = 0.0 if logit_score < 0 else 1.0
+
+            final_score = _boosted_score(
+                payload=payload,
+                base_score=sigmoid_score,
+                keywords=keywords,
+                session_id=session_id,
+                selected_document_ids=selected_document_ids,
+            )
+            reranked.append((payload, final_score, match_type))
+    else:
+        # Standard scoring path (RRF / Semantic / Keyword)
+        for key, item in candidates.items():
+            payload = item["payload"]
+            semantic_score = item["semantic_score"]
+            keyword_score = item["keyword_score"]
+
+            if retrieval_mode == "hybrid":
+                r_sem = semantic_ranks.get(key)
+                r_key = keyword_ranks.get(key)
+                
+                score_sem = 1.0 / (60.0 + r_sem) if r_sem else 0.0
+                score_key = 1.0 / (60.0 + r_key) if r_key else 0.0
+                
+                # Normalize RRF base score to [0, 1] range to match scale of boosts.
+                # Max possible score is 1/61 + 1/61 = 2/61. Multiply by 30.5 to normalize.
+                base_score = (score_sem + score_key) * 30.5
+            elif retrieval_mode == "keyword":
+                base_score = keyword_score
             else:
-                match_type = "keyword"
-        reranked.append((payload, final_score, match_type))
+                base_score = semantic_score
+
+            final_score = _boosted_score(
+                payload=payload,
+                base_score=base_score,
+                keywords=keywords,
+                session_id=session_id,
+                selected_document_ids=selected_document_ids,
+            )
+            match_type = retrieval_mode
+            if retrieval_mode == "hybrid":
+                if semantic_score and keyword_score:
+                    match_type = "hybrid"
+                elif semantic_score:
+                    match_type = "semantic"
+                else:
+                    match_type = "keyword"
+            reranked.append((payload, final_score, match_type))
 
     reranked.sort(key=lambda item: item[1], reverse=True)
 
@@ -657,6 +814,7 @@ async def delete_document_vectors(
     Uses a compound filter (user_id AND document_id) so that a user can never
     accidentally delete vectors owned by someone else.
     """
+    await init_qdrant_collection()
     await qdrant_client.delete(
         collection_name=settings.qdrant_collection,
         points_selector=Filter(
