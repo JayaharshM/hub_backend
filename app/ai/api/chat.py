@@ -340,6 +340,37 @@ async def _process_chat_message_and_stream(
     db.add(user_msg)
     await db.commit()
 
+    # Generate title using LLM if it's a newly created session (default title "New Chat")
+    if session.title in ("New Chat", "Untitled Chat", ""):
+        try:
+            from app.config import settings as app_settings
+            async with httpx.AsyncClient(timeout=4) as client:
+                resp = await client.post(
+                    f"{app_settings.ollama_base_url}/api/generate",
+                    json={
+                        "model": app_settings.ollama_model,
+                        "prompt": (
+                            "You are a helpful assistant. Generate a short, clean, descriptive title "
+                            "for a chat session (strictly 3 to 5 words, no punctuation, no quotes, no markdown) "
+                            "based on this first question from the user. Output ONLY the title text and nothing else.\n\n"
+                            f"Question: {content}\n\n"
+                            "Title:"
+                        ),
+                        "stream": False,
+                        "options": {
+                            "num_predict": 20
+                        }
+                    },
+                )
+                if resp.status_code == 200:
+                    title_text = resp.json().get("response", "").strip()
+                    title_text = title_text.strip('\"\'')
+                    if title_text and len(title_text) < 50:
+                        session.title = title_text
+                        await db.commit()
+        except Exception as exc:
+            logger.warning("Failed to generate chat title via Ollama: %s", exc)
+
     # 3. Build chat history: last 10 messages (oldest first) that are not summarized.
     # We prune history if it exceeds 32,000 characters (~8,000 tokens) to prevent prompt bloat.
     history_result = await db.execute(
